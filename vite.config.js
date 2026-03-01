@@ -5,5 +5,5 @@ export default defineConfig({
   plugins: [react()],
   // GitHub Pages serves from /<repo-name>/
   // Change 'dansk-pension-simulator' to match your repo name
-  base: '/pension/',
+  base: '/Pension/',
 })
