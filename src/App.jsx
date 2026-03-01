@@ -15,14 +15,87 @@ const pct = (n) => (n * 100).toFixed(1) + "%";
 
 function extractPensionData(text) {
   const data = { totalSavings:0, annualContribution:0, ratepension:0, livsvarig:0, aldersopsparing:0, kapitalpension:0, provider:"" };
-  ["PFA","Danica","Velliv","AP Pension","Nordea Liv","Topdanmark","SEB","Sampension","PensionDanmark","Industriens Pension","PKA","ATP"].forEach(p => { if (text.toLowerCase().includes(p.toLowerCase())) data.provider = data.provider || p; });
-  const pats = [{key:"ratepension",rx:/ratepension[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi},{key:"livsvarig",rx:/livsvarig[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi},{key:"aldersopsparing",rx:/aldersopsparing[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi},{key:"kapitalpension",rx:/kapitalpension[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi}];
-  pats.forEach(p => { let m; while((m=p.rx.exec(text))!==null){const v=parseFloat(m[1].replace(/\./g,"").replace(",",".")); if(v>0&&v<5e7) data[p.key]=Math.max(data[p.key],v);} });
-  let m2; const cr=/(?:årlig|indbetaling|bidrag)[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi;
-  while((m2=cr.exec(text))!==null){const v=parseFloat(m2[1].replace(/\./g,"").replace(",",".")); if(v>1000&&v<500000) data.annualContribution=Math.max(data.annualContribution,v);}
-  const tr=/(?:samlet|depot|opsparing|i alt|værdi)[^0-9]*?(\d[\d.]*(?:,\d{2})?)/gi;
-  while((m2=tr.exec(text))!==null){const v=parseFloat(m2[1].replace(/\./g,"").replace(",",".")); if(v>10000&&v<1e8) data.totalSavings=Math.max(data.totalSavings,v);}
-  if(!data.totalSavings) data.totalSavings=data.ratepension+data.livsvarig+data.aldersopsparing+data.kapitalpension;
+  // Normalize: collapse whitespace, fix common OCR issues
+  const t = text.replace(/\s+/g, ' ');
+  
+  // Provider detection
+  ["PFA","Danica","Velliv","AP Pension","Nordea Liv","Topdanmark","SEB Pension","Sampension","PensionDanmark","Industriens Pension","PKA","Lærernes Pension","ATP","Skandia","Alm. Brand"].forEach(p => { 
+    if (t.toLowerCase().includes(p.toLowerCase())) data.provider = data.provider || p; 
+  });
+
+  // Helper to parse Danish number formats: "1.234.567,89" or "1234567" or "1.234.567"
+  const parseNum = (s) => {
+    if (!s) return 0;
+    // Remove spaces and dots used as thousand separators, handle comma as decimal
+    let clean = s.replace(/\s/g, '');
+    if (clean.includes(',')) {
+      clean = clean.replace(/\./g, '').replace(',', '.');
+    } else if ((clean.match(/\./g) || []).length > 1) {
+      clean = clean.replace(/\./g, '');
+    }
+    return parseFloat(clean) || 0;
+  };
+
+  // Generic amount finder - finds all monetary amounts in text
+  const amountRx = /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)\s*(?:kr\.?|DKK)/gi;
+  const amounts = [];
+  let mx;
+  while ((mx = amountRx.exec(t)) !== null) {
+    const v = parseNum(mx[1]);
+    if (v > 0) amounts.push(v);
+  }
+
+  // Also match plain numbers near pension keywords (PensionInfo often omits "kr")
+  const plainNumRx = /(\d{1,3}(?:\.\d{3})+(?:,\d{2})?)/g;
+  
+  // Pension type patterns - broader matching for PensionInfo format
+  const typePatterns = [
+    { key: "ratepension", rxs: [/rate(?:pension|opsparing)[^0-9]{0,40}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi, /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?rate(?:pension|opsparing)/gi] },
+    { key: "livsvarig", rxs: [/livsvarig[^0-9]{0,40}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi, /livrente[^0-9]{0,40}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi, /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?livs(?:varig|rente)/gi] },
+    { key: "aldersopsparing", rxs: [/alders(?:opsparing|pension)[^0-9]{0,40}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi, /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?alders(?:opsparing|pension)/gi] },
+    { key: "kapitalpension", rxs: [/kapital(?:pension|opsparing)[^0-9]{0,40}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi, /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?kapital(?:pension|opsparing)/gi] },
+  ];
+  
+  for (const tp of typePatterns) {
+    for (const rx of tp.rxs) {
+      let m;
+      while ((m = rx.exec(t)) !== null) {
+        const v = parseNum(m[1]);
+        if (v > 100 && v < 5e7) data[tp.key] = Math.max(data[tp.key], v);
+      }
+    }
+  }
+
+  // Annual contribution
+  const contribRxs = [
+    /(?:årlig|årl\.|indbetaling|bidrag|præmie)[^0-9]{0,30}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi,
+    /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?(?:årlig|pr\.\s*år|\/år|om året)/gi,
+  ];
+  for (const rx of contribRxs) {
+    let m;
+    while ((m = rx.exec(t)) !== null) {
+      const v = parseNum(m[1]);
+      if (v > 1000 && v < 500000) data.annualContribution = Math.max(data.annualContribution, v);
+    }
+  }
+
+  // Total / depot value
+  const totalRxs = [
+    /(?:samlet|depot|i alt|total|opsparing|værdi|saldo|formue)[^0-9]{0,30}?(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)/gi,
+    /(\d{1,3}(?:[\.\s]\d{3})*(?:,\d{1,2})?)[^0-9]{0,20}?(?:samlet|i alt|total)/gi,
+  ];
+  for (const rx of totalRxs) {
+    let m;
+    while ((m = rx.exec(t)) !== null) {
+      const v = parseNum(m[1]);
+      if (v > 10000 && v < 1e8) data.totalSavings = Math.max(data.totalSavings, v);
+    }
+  }
+
+  // Fallbacks
+  if (!data.totalSavings) data.totalSavings = data.ratepension + data.livsvarig + data.aldersopsparing + data.kapitalpension;
+  if (!data.totalSavings && amounts.length > 0) data.totalSavings = Math.max(...amounts.filter(a => a > 10000));
+  
   return data;
 }
 
@@ -178,17 +251,81 @@ export default function DanskPensionSimulator() {
   const [parseStatus, setParseStatus] = useState("");
   const fileInputRef = useRef(null);
 
-  const handleFile = useCallback(async(file)=>{
-    if(!file)return; setParseStatus("Læser fil...");
-    try{const text=await file.text();const data=extractPensionData(text);
-      setPersons(prev=>{const u=[...prev],t=u[0];
-        if(data.totalSavings>0)t.totalSavings=data.totalSavings;if(data.annualContribution>0)t.annualContribution=data.annualContribution;
-        if(data.ratepension>0)t.ratepension=data.ratepension;if(data.livsvarig>0)t.livsvarig=data.livsvarig;
-        if(data.aldersopsparing>0)t.aldersopsparing=data.aldersopsparing;if(data.kapitalpension>0)t.kapitalpension=data.kapitalpension;
-        if(data.provider)t.provider=data.provider;return u;});
-      setParseStatus(data.totalSavings>0?`✓ Fandt: ${fmt(data.totalSavings)}${data.provider?` (${data.provider})`:""}`:"⚠ Udfyld manuelt");
-    }catch{setParseStatus("⚠ Kunne ikke læse filen");}
-  },[]);
+  const loadPdfJs = useCallback(async () => {
+    if (window.pdfjsLib) return window.pdfjsLib;
+    return new Promise((resolve, reject) => {
+      if (document.getElementById('pdfjs-script')) {
+        const check = setInterval(() => { if (window.pdfjsLib) { clearInterval(check); resolve(window.pdfjsLib); } }, 100);
+        return;
+      }
+      const script = document.createElement('script');
+      script.id = 'pdfjs-script';
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      script.onload = () => {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      };
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }, []);
+
+  const extractTextFromPdf = useCallback(async (file) => {
+    const pdfjsLib = await loadPdfJs();
+    const arrayBuffer = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    let fullText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map(item => item.str).join(' ');
+      fullText += pageText + '\n';
+    }
+    return fullText;
+  }, [loadPdfJs]);
+
+  const applyPensionData = useCallback((data) => {
+    setPersons(prev => {
+      const u = [...prev], t = u[0];
+      if (data.totalSavings > 0) t.totalSavings = data.totalSavings;
+      if (data.annualContribution > 0) t.annualContribution = data.annualContribution;
+      if (data.ratepension > 0) t.ratepension = data.ratepension;
+      if (data.livsvarig > 0) t.livsvarig = data.livsvarig;
+      if (data.aldersopsparing > 0) t.aldersopsparing = data.aldersopsparing;
+      if (data.kapitalpension > 0) t.kapitalpension = data.kapitalpension;
+      if (data.provider) t.provider = data.provider;
+      return u;
+    });
+  }, []);
+
+  const handleFile = useCallback(async (file) => {
+    if (!file) return;
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    setParseStatus(isPdf ? "📄 Læser PDF — vent venligst..." : "Læser fil...");
+    try {
+      let text;
+      if (isPdf) {
+        text = await extractTextFromPdf(file);
+      } else {
+        text = await file.text();
+      }
+      const data = extractPensionData(text);
+      applyPensionData(data);
+      if (data.totalSavings > 0) {
+        const parts = [];
+        if (data.ratepension > 0) parts.push(`Rate: ${fmt(data.ratepension)}`);
+        if (data.livsvarig > 0) parts.push(`Livsvarig: ${fmt(data.livsvarig)}`);
+        if (data.aldersopsparing > 0) parts.push(`Alder: ${fmt(data.aldersopsparing)}`);
+        if (data.kapitalpension > 0) parts.push(`Kapital: ${fmt(data.kapitalpension)}`);
+        setParseStatus(`✓ Fandt pensionsdata: ${fmt(data.totalSavings)} samlet${data.provider ? ` (${data.provider})` : ''}${parts.length ? '\n   ' + parts.join(' · ') : ''}`);
+      } else {
+        setParseStatus("⚠ Kunne ikke finde beløb automatisk. Prøv at udfylde manuelt. Tip: Hent din rapport fra pensionsinfo.dk som PDF.");
+      }
+    } catch (err) {
+      console.error('File parse error:', err);
+      setParseStatus("⚠ Kunne ikke læse filen. Understøtter PDF, tekst og CSV fra PensionInfo.");
+    }
+  }, [extractTextFromPdf, applyPensionData]);
   const handleDrop = useCallback(e=>{e.preventDefault();setDragOver(false);if(e.dataTransfer.files[0])handleFile(e.dataTransfer.files[0]);},[handleFile]);
 
   const runSimulation = () => {
@@ -233,10 +370,10 @@ export default function DanskPensionSimulator() {
           <div>
             <Card style={{marginBottom:"20px",border:dragOver?`2px dashed ${C.accent}`:`1px dashed ${C.border}`,cursor:"pointer",textAlign:"center"}}
               onDragOver={e=>{e.preventDefault();setDragOver(true)}} onDragLeave={()=>setDragOver(false)} onDrop={handleDrop} onClick={()=>fileInputRef.current?.click()}>
-              <input ref={fileInputRef} type="file" accept=".txt,.csv,.xml,.json" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
+              <input ref={fileInputRef} type="file" accept=".pdf,.txt,.csv,.xml,.json" style={{display:"none"}} onChange={e=>handleFile(e.target.files[0])}/>
               <div style={{fontSize:"32px",marginBottom:"8px"}}>📄</div>
-              <div style={{fontSize:"14px",color:C.text,fontWeight:500}}>Træk pensionsrapport hertil</div>
-              <div style={{fontSize:"12px",color:C.textDim,marginTop:"4px"}}>Tekst/CSV fra PensionInfo</div></Card>
+              <div style={{fontSize:"14px",color:C.text,fontWeight:500}}>Træk pensionsrapport hertil (PDF)</div>
+              <div style={{fontSize:"12px",color:C.textDim,marginTop:"4px"}}>Understøtter PDF, tekst og CSV fra PensionInfo</div></Card>
             {parseStatus&&<div style={{padding:"12px 16px",background:`${C.amber}15`,border:`1px solid ${C.amber}40`,borderRadius:"8px",fontSize:"13px",color:C.amber,marginBottom:"16px"}}>{parseStatus}</div>}
             {persons.map((p,i)=><PersonForm key={i} index={i} person={p} onChange={d=>updatePerson(i,d)} onRemove={persons.length>1?()=>removePerson(i):null}/>)}
             {persons.length<2&&<button onClick={addPerson} style={{width:"100%",padding:"12px",background:"transparent",border:`1px dashed ${C.border}`,borderRadius:"8px",color:C.textMuted,cursor:"pointer",fontSize:"14px"}}>+ Tilføj ægtefælle/partner</button>}
